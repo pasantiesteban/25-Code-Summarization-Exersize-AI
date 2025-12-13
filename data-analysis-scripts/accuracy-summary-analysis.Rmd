@@ -1,0 +1,788 @@
+---
+title: "Code Summary Analysis (All 4 Attributes)"
+output: html_document
+date: "2025-1-29"
+---
+
+## Packages
+
+```{r}
+# import packages
+library(lme4)     # mixed models
+library(dplyr)    # dataframe manipulation
+library(readr)    # reading in the data
+library(emmeans)  # likelihood ratio testing
+library(purrr)    # for map()
+library(lattice)  # for xyplot()
+library(TAF)      # setting up output file directory structure during model fitting
+library(moments)  # skewness for selecting between additive and multiplicative models of response times
+library(ordinal)
+
+library(ggplot2)
+library(performance)
+
+
+#If you get an error, you likely need to install the packages using the "install.package('insert-package-name-here')" command
+```
+
+
+## Notebook configurable settings
+
+```{r}
+# name the directories to read data from and write output to
+input_version = 2
+output_version = 'programming'
+
+```
+
+make an overall output directory (model summaries, stats, etc. will all go here)
+```{r}
+
+outputdir = sprintf("%s/../candidate-models/regression-models-%s",getwd(), output_version)
+#mkdir(outputdir) #only uncomment this if you don't already have an output directory
+```
+
+## Loading Data
+
+```{r}
+input_file = sprintf("%s/../preprocessed-data/full-data-version-%d/programming-full-data.csv", getwd(), input_version)
+data <- read.csv(input_file)
+
+#data
+
+```
+
+
+Computing the IPAQ score and adding it as a column to the data
+```{r Nans}
+
+# Helper to force numeric and turn NAs/blanks into 0
+nz <- function(x) {
+  x <- suppressWarnings(as.numeric(x))
+  x[is.na(x)] <- 0
+  x
+}
+
+# Coerce all inputs
+data$days_vigorous    <- nz(data$days_vigorous)
+data$minutes_vigorous <- nz(data$minutes_vigorous)
+data$days_moderate    <- nz(data$days_moderate)
+data$minutes_moderate <- nz(data$minutes_moderate)
+data$days_walking     <- nz(data$days_walking)
+data$minutes_walking  <- nz(data$minutes_walking)   # important: was <chr>
+data$hours_sitting    <- nz(data$hours_sitting)
+
+# MET constants from IPAQ scoring guidelines
+MET_VIG  <- 8.0
+MET_MOD  <- 4.0
+MET_WALK <- 3.3
+
+# Component MET-min/week scores
+data$vigorous_met <- ifelse(
+  data$days_vigorous > 0 & data$minutes_vigorous > 0,
+  data$days_vigorous * data$minutes_vigorous * MET_VIG,
+  0
+)
+
+data$moderate_met <- ifelse(
+  data$days_moderate > 0 & data$minutes_moderate > 0,
+  data$days_moderate * data$minutes_moderate * MET_MOD,
+  0
+)
+
+data$walking_met <- ifelse(
+  data$days_walking > 0 & data$minutes_walking > 0,
+  data$days_walking * data$minutes_walking * MET_WALK,
+  0
+)
+
+# Total IPAQ MET-min/week
+data$ipa_total_met <- data$vigorous_met + data$moderate_met + data$walking_met
+
+# Number of days doing ANY activity (required for categorization)
+data$total_days_any <- data$days_vigorous + data$days_moderate + data$days_walking
+
+# IPAQ categorical classification HIGH / MODERATE / LOW
+data$ipaq_category <- "Low"   # default
+
+# High:
+data$ipaq_category[
+  (data$days_vigorous >= 3 & data$ipa_total_met >= 1500) |
+  (data$total_days_any >= 7 & data$ipa_total_met >= 3000)
+] <- "High"
+
+# Moderate (only if not High):
+data$ipaq_category[
+  data$ipaq_category != "High" &
+  (
+    (data$days_vigorous >= 3 & data$minutes_vigorous >= 20) |
+    (data$days_moderate >= 5 & data$minutes_moderate >= 30) |
+    (data$days_walking  >= 5 & data$minutes_walking  >= 30) |
+    (data$total_days_any >= 5 & data$ipa_total_met >= 600)
+  )
+] <- "Moderate"
+
+# Done! You now have:
+# vigorous_met, moderate_met, walking_met, ipa_total_met, ipaq_category
+
+# Optional quick checks:
+table(data$ipaq_category)
+summary(data$ipa_total_met)
+
+```
+
+
+
+### Data filtering
+
+We are remvoing trails where the participant did not read the AI when in the AI group and the participants in the self-video format
+```{r}
+#df <- subset(data, zoom_self != "self")
+df <- subset(data, read_ai != "No")
+```
+
+
+
+### Data Distribution
+
+
+Identifying the mean correctness score
+```{r}
+mean_C <- mean((df$completeness_both))
+mean_CS <- mean((df$conciseness_both))
+mean_R <- mean((df$readability_both))
+mean_A <- mean((df$accuracy_both))
+mean_overall <- mean((df$correctness_score_overall))
+print(mean_C)
+print(mean_CS)
+print(mean_R)
+print(mean_A)
+print(mean_overall)
+```
+Participant count
+
+```{r}
+#Make sure you have n=47 participants 
+
+
+
+id <- unique(data$part_id)
+id #all unique IDs
+length(id) #number of participants
+```
+
+
+## Select independent variables 
+
+
+
+## Specify candidate predictor structures for mixed model formulas
+
+
+```{r eval=FALSE}
+
+# Always include (core)
+core_mains <- c("exercise", "ai", "seq_num")
+
+# covariates
+optional_mains <- c("project_name", "ipaq_category", "occupation")
+
+# Optional interactions
+candidate_interactions <- c(
+  "exercise * ai",
+  "exercise * ipaq_category",
+  # "ai * ipaq_category"       
+  "ai * seq_num",
+  "exercise * seq_num" # learning-curve moderation
+  #"ai * has_bug",
+  #"exercise * has_bug"
+)
+```
+
+
+## Consider possible fixed effects structure
+
+```{r eval=FALSE}
+make_fixed_forms <- function(core_mains, optional_mains, candidate_interactions) {
+  fixed_forms <- character(0)
+  
+  ## 1) Parse interactions into list(name, vars)
+  # e.g. "exercise * ai" -> name = "exercise:ai", vars = c("exercise","ai")
+  interaction_defs <- lapply(candidate_interactions, function(trm) {
+    vars <- trimws(strsplit(trm, "\\*")[[1]])
+    list(
+      name = paste(vars, collapse = ":"),  # use ":" in the formula
+      vars = vars
+    )
+  })
+  
+  ## 2) All subsets of optional mains (including empty set)
+  opt_subsets <- list(character(0))
+  if (length(optional_mains) > 0) {
+    for (k in 1:length(optional_mains)) {
+      opt_subsets <- c(
+        opt_subsets,
+        combn(optional_mains, k, simplify = FALSE)
+      )
+    }
+  }
+  
+  ## 3) All subsets of interactions (including empty)
+  int_subsets <- list(integer(0))  # each element is a vector of indices into interaction_defs
+  n_int <- length(interaction_defs)
+  if (n_int > 0) {
+    for (k in 1:n_int) {
+      int_subsets <- c(
+        int_subsets,
+        combn(seq_len(n_int), k, simplify = FALSE)
+      )
+    }
+  }
+  
+  ## 4) Build RHS strings
+  for (opt_set in opt_subsets) {
+    for (int_idx_set in int_subsets) {
+      
+      # which interactions are in this candidate?
+      if (length(int_idx_set) == 0) {
+        int_terms <- character(0)
+        int_vars  <- character(0)
+      } else {
+        int_defs  <- interaction_defs[int_idx_set]
+        int_terms <- vapply(int_defs, `[[`, character(1), "name")
+        int_vars  <- unique(unlist(lapply(int_defs, `[[`, "vars")))
+      }
+      
+      # all main-effect variables present in this model
+      mains_here <- unique(c(core_mains, opt_set))
+      
+      # hierarchy rule: only keep models where all interaction vars are in mains
+      if (!all(int_vars %in% mains_here)) {
+        next
+      }
+      
+      # assemble full RHS term list
+      terms <- c(core_mains, opt_set, int_terms)
+      rhs   <- paste(terms, collapse = " + ")
+      fixed_forms <- c(fixed_forms, rhs)
+    }
+  }
+  
+  unique(fixed_forms)
+}
+
+fixed_forms <- make_fixed_forms(core_mains, optional_mains, candidate_interactions)
+fixed_effects <- fixed_forms
+fixed_effects
+```
+
+
+## Consider random effects structure
+
+```{r eval=FALSE}
+random_structures <- c(
+  R01 = "(1 | part_id)", 
+  R02 = "(1 | stim_src_id)", 
+  R0  = "(1 | part_id) + (1 | stim_src_id)",                 # intercepts only
+  R1  = "(1 + ai | part_id) + (1 | stim_src_id)",            # AI slope
+  R2  = "(1 + exercise | part_id) + (1 | stim_src_id)",      # exercise slope
+  R3  = "(1 + ai + exercise | part_id) + (1 | stim_src_id)" # both slopes (correlated)
+  #R3u = "(1 + ai + exercise || part_id) + (1 | stim_src_id)" # both slopes, no corr
+)
+```
+
+
+
+```{r eval=FALSE}
+
+
+## 2. Main fixed-effects part of the model
+## We could consider it for all the DVs
+fixed_main <- "factor(conciseness_both) ~ exercise + ai + seq_num"
+
+
+## 4. Helper that fits all random structures and catches errors
+fit_random_structures <- function(df, fixed_main, random_structures) {
+  fits <- lapply(random_structures, function(re) {
+    f_txt <- paste(fixed_main, "+", re)
+    f <- as.formula(f_txt)
+    message("\nFitting: ", f_txt)
+
+    fit <- tryCatch(
+      {
+        clmm(f, data = df)
+      },
+      error = function(e) {
+        message("  ERROR: ", e$message)
+        return(NULL)
+      },
+      warning = function(w) {
+        message("  WARNING: ", w$message)
+        invokeRestart("muffleWarning")  # show once, then silence
+      }
+    )
+
+    fit
+  })
+
+  names(fits) <- random_structures
+  fits
+}
+
+## 5. Run the fits
+
+m_rand <- fit_random_structures(df, fixed_main, random_structures)
+
+## 6. Drop models that failed (NULL)
+m_rand_ok <- Filter(Negate(is.null), m_rand)
+
+## 7. Compare AIC and BIC
+aic_tab <- sapply(m_rand_ok, AIC)
+bic_tab <- sapply(m_rand_ok, BIC)
+
+cat("\nAIC by random structure:\n")
+print(aic_tab)
+
+cat("\nBIC by random structure:\n")
+print(bic_tab)
+
+## 8. Pick the best random structure by AIC (or BIC)
+best_by_aic <- names(aic_tab)[which.min(aic_tab)]
+cat("\nBest random structure by AIC:", best_by_aic, "\n")
+
+best_model <- m_rand_ok[[best_by_aic]]
+
+## 9. Inspect the chosen model
+
+#summary(best_model)
+
+
+```
+
+We freeze random structure to: (1 | part_id) for the accuracy model
+We freeze random structure to: (1 | part_id) + (1 | stim_src_id) for completeness model (we do not choose the AIC preffered structure since Intercept–AI slope correlation = –1)
+We freeze random structure to: (1 | part_id) for the readability model
+We freeze random structure to: (1 | part_id) for the consicness model
+
+
+```{r eval=FALSE}
+
+random_exprs = "(1 | part_id)"                        #for accuracy model, readability model, consiceness model
+random_exprs = "(1 | part_id) + (1 | stim_src_id)"    #for completeness
+  
+```
+
+
+
+Now, we combine the response variable, fixed effects, and random effects together to generate our candidate model structures.
+
+```{r eval=FALSE}
+
+loglinear_formulae = c()
+for (fe in fixed_effects) {
+  for (re in random_exprs) {
+    f = ""
+    if (fe == "") {
+      f = sprintf("factor(conciseness_both) ~ %s", re)
+    } else {
+      f = sprintf("factor(conciseness_both) ~ %s + %s", fe, re)
+    }
+    loglinear_formulae = append(loglinear_formulae, f)
+  }
+}
+
+print(length(loglinear_formulae))
+
+```
+
+
+### Model fitting (\~2 minutes)
+
+Here, we fit all the models. Of note, we use MLE rather than REML for compatibility with the AIC model selection strategy.
+
+We also store BIC (an alternative model selection criterion) in addition to AIC here. The two have different theoretical properties, both of which may be useful. Both describe the log likelihood of a fitted model, with a penalty for model complexity. The penalty in BIC is higher than that for AIC, so optimal-BIC models tend to be smaller (with fewer parameters) than optimal-AIC models. We have done our analysis relying on AIC, but we provide BIC-based model selection here in case the reader is interested.
+
+```{r eval=FALSE}
+if (TRUE) {
+  # make an output directory for the output of all the candidate linear models
+  logtime_outputdir = 
+    sprintf("%s/conciseness_both_score_model_summaries_only_frozen_re", outputdir)
+  mkdir(logtime_outputdir)
+  
+  # make an output file for the AIC and BIC of each model
+  metricsfile = sprintf("%s/metrics.csv", logtime_outputdir)
+  file.create(metricsfile)
+  
+  sink(file = metricsfile,
+       append = FALSE,
+       type = "output",
+       split = FALSE
+       )
+  
+  cat("formula,AIC,BIC\n")
+  
+  sink()
+  
+  for (f in loglinear_formulae) {
+    # make an output directory for the output of this specific candidate model
+    f_outputdir = sprintf("%s/%s", logtime_outputdir, gsub(" ", "", f, fixed = TRUE))
+    mkdir(f_outputdir)
+    
+    # make the individual output file
+    summaryfile = sprintf("%s/summary.txt", f_outputdir)
+    
+    file.create(summaryfile)
+    
+    # print a delimiter for console output
+    cat(sprintf("\n---------------------------------------------\n%s\n", f))
+    
+    # fit the model
+    #m = lmer(f, data=df, REML=FALSE)
+    m = clmm(f, data=df)
+    
+    # send the model summary to the summary file
+    sink(file = summaryfile,
+         append = FALSE,
+         type = "output",
+         split = FALSE
+         )
+    
+    #print(summary(m))
+    
+    sink()
+    
+    # send the AIC and BIC to the metrics file
+    metrics = sprintf("%s,%f,%f\n", f, AIC(m), BIC(m))
+    
+    sink(file = metricsfile,
+         append = TRUE,
+         type = "output",
+         split = FALSE)
+    
+    cat(metrics)
+    
+    sink()
+  }
+}
+```
+
+
+# Model selection
+## Accuracy Category in Summary
+
+```{r}
+# read in the AIC/BIC data
+fin = sprintf("%s/accuracy_both_score_model_summaries_only_frozen_re/metrics.csv", outputdir)
+log_time_models_da = read_csv(fin)
+```
+```{r}
+head(log_time_models_da[order(log_time_models_da$AIC),], n = 10)
+head(log_time_models_da[order(log_time_models_da$BIC),], n = 10)
+```
+AIC and BIC disagree on the best model fit so we use an anova to determine best one
+
+```{r}
+fA = log_time_models_da[order(log_time_models_da$AIC),]$formula[[1]]
+#cat(fA)
+m0 = clmm(fA, data=df)
+
+fB = log_time_models_da[order(log_time_models_da$BIC),]$formula[[1]]
+#cat(fB)
+m1 =  clmm(fB, data=df)
+
+
+anova(m0,m1)
+```
+
+
+
+m0 is preferred by anova : factor(accuracy_both) ~ exercise + ai + seq_num + project_name + occupation + exercise:ai + exercise:seq_num + (1 | part_id)
+
+We are also curious about the complexity metrics so we check for these by assessing if adding them improves model fit:
+```{r}
+df$halstead_z <- scale(df$halstead_volume) #we need to rescale it
+f_hal =  factor(accuracy_both) ~ exercise + ai + seq_num + project_name + occupation + exercise:ai + exercise:seq_num + halstead_z + (1 | part_id)
+m_hal = clmm(f_hal, data=df)
+
+anova(m0, m_hal)
+
+#summary(m_hal)
+
+```
+Adding the halstead_z makes the model fit better p = 0.03736 *
+
+
+
+```{r}
+df$cyclomatic_compl_z <- scale(df$cyclomatic_compl) #we need to rescale it
+f_cyc =  factor(accuracy_both) ~ exercise + ai + seq_num + project_name + occupation + exercise:ai + exercise:seq_num + cyclomatic_compl_z + (1 | part_id)
+m_cyc = clmm(f_cyc, data=df)
+
+anova(m0, m_cyc)
+```
+
+Adding the cyclomatic_compl_z DOES NOT make the model fit better p = 0.5271
+
+
+
+So now we can look at the chosen model in depth: factor(accuracy_both) ~ exercise + ai + seq_num + project_name + occupation + exercise:ai + exercise:seq_num + halstead_z + (1 | part_id)
+
+```{r}
+summary(m_hal)
+```
+
+exerciseTrue  β = -2.669, p = 0.0014 **
+(Meaning - Participants in the exercise condition were much less likely to achieve higher accuracy ratings than those in the non-exercise condition.
+
+aiTrue  β = 0.153, p = 0.742  (ns)
+(Meaning - AI assistance did not significantly change the odds of higher accuracy, on average.)
+
+seq_num  β = -0.369, p = 0.0076 **
+(Meaning - As participants progressed through trials, accuracy decreased.)
+
+project_name β = -0.617, p = 0.032 *
+(Meaning - Accuracy was significantly lower on the spring-ai-alibaba project than on the reference project.)
+
+
+occupation β = 2.984, p = 0.038 *
+(Meaning - Participants in the “Other” occupation category had dramatically higher accuracy than the reference occupation group.)
+
+
+exercise X AI β = 1.204, p = 0.096  (marginal)
+(meaning - Exercise alone hurts accuracy (strongly negative, AI alone does nothing, But AI partially offsets the harm of exercise)
+
+
+exercise X Seq_num β = 0.515, p = 0.009 **
+(meaning- Without exercise: accuracy declines across trials With exercise: that decline is significantly reduced or even reversed)
+
+Under the non-exercise condition, accuracy declined over time; under the exercise condition, this decline was slower.
+
+
+halstead_z 2.235  0.02544 * 
+(meaning- as halstead score increased, more likely to be correct)
+
+```{r}
+#df_ai <- subset(df, ai == "True")
+#df_ai$ai3 <- case_when(
+#    df_ai$tp_tn %in% c("TP","TN") ~ "ai_correct",
+#    df_ai$tp_tn == "FN" ~ "ai_wrong",
+#    df_ai$tp_tn == "FP" ~ "ai_wrong"
+#)
+#df_ai
+
+
+#f_ai =  factor(accuracy_both) ~ exercise + ai3 + seq_num + (1 | part_id)
+#m_ai = clmm(f_ai, data=df_ai)
+#summary(m_ai)
+
+
+```
+
+
+
+
+
+## Completeness Category in Summary
+
+```{r}
+# read in the AIC/BIC data
+fin = sprintf("%s/completeness_both_score_model_summaries_only/metrics.csv", outputdir)
+log_time_models_da = read_csv(fin)
+```
+
+```{r}
+head(log_time_models_da[order(log_time_models_da$AIC),], n = 10)
+head(log_time_models_da[order(log_time_models_da$BIC),], n = 10)
+```
+AIC and BIC agree on the best model fit : factor(completeness_both) ~ exercise + ai + seq_num + (1 | part_id) + (1 | stim_src_id)
+
+```{r}
+fA = log_time_models_da[order(log_time_models_da$AIC),]$formula[[2]]
+#cat(fA)
+m0 = clmm(fA, data=df)
+
+```
+
+
+
+We are intested in assessing complexity metrics
+
+```{r}
+df$halstead_z <- scale(df$halstead_volume) #we need to rescale it
+f_hal =  factor(completeness_both) ~ exercise + ai + seq_num + halstead_z + (1 | part_id) + (1 | stim_src_id) 
+m_hal = clmm(f_hal, data=df)
+
+anova(m0, m_hal)
+```
+Adding the halstead_z DOES NOT make the model fit better p = 0.3819
+
+```{r}
+df$cyclomatic_compl_z <- scale(df$cyclomatic_compl) #we need to rescale it
+f_cyc =  factor(completeness_both) ~ exercise + ai + seq_num + cyclomatic_compl_z + (1 | part_id) + (1 | stim_src_id) 
+m_cyc = clmm(f_cyc, data=df)
+
+anova(m0, m_cyc)
+```
+Adding the cyclomatic_compl_z DOES NOT make the model fit better p = 0.6912
+
+
+
+We can now consider our model in depth: 
+
+```{r}
+summary(m0)
+
+r2(m0)
+```
+
+ai (2.069   0.0386 *)
+(ai made you more complete than without ai)
+
+
+
+```{r}
+#df_ai <- subset(df, ai == "True")
+#df_ai$ai3 <- case_when(
+#    df_ai$tp_tn %in% c("TP","TN") ~ "ai_correct",
+#    df_ai$tp_tn == "FN" ~ "ai_wrong",
+#    df_ai$tp_tn == "FP" ~ "ai_wrong"
+#)
+#df_ai
+
+
+#f_ai =  factor(completeness_both) ~ exercise + ai3 + seq_num + (1 | part_id) + (1 | stim_src_id) 
+#m_ai = clmm(f_ai, data=df_ai)
+#summary(m_ai)
+
+
+```
+
+
+## Conciseness Category in Summary
+
+```{r}
+# read in the AIC/BIC data
+fin = sprintf("%s/conciseness_both_score_model_summaries_only_frozen_re/metrics.csv", outputdir)
+log_time_models_da = read_csv(fin)
+
+
+head(log_time_models_da[order(log_time_models_da$AIC),], n = 10)
+head(log_time_models_da[order(log_time_models_da$BIC),], n = 10)
+```
+AIC and BIC disagree on the best model fit so we use an anova to determine best one
+
+```{r}
+fA = log_time_models_da[order(log_time_models_da$AIC),]$formula[[1]]
+#cat(fA)
+m0 = clmm(fA, data=df)
+
+fB = log_time_models_da[order(log_time_models_da$BIC),]$formula[[1]]
+#cat(fB)
+m1 =  clmm(fB, data=df)
+
+
+anova(m0,m1)
+```
+
+Model favor m0 : factor(conciseness_both) ~ exercise + ai + seq_num + project_name + occupation + (1 | part_id)
+
+
+
+We are intested in assessing complexity metrics
+
+```{r}
+df$halstead_z <- scale(df$halstead_volume) #we need to rescale it
+f_hal =  factor(conciseness_both) ~ exercise + ai + seq_num + project_name + occupation + halstead_z + (1 | part_id)
+m_hal = clmm(f_hal, data=df)
+
+anova(m0, m_hal)
+```
+Adding the halstead_z DOES NOT make the model fit better p = 0.6659
+
+```{r}
+df$cyclomatic_compl_z <- scale(df$cyclomatic_compl) #we need to rescale it
+f_cyc =  factor(conciseness_both) ~ exercise + ai + seq_num + project_name + occupation + cyclomatic_compl_z + (1 | part_id) 
+m_cyc = clmm(f_cyc, data=df)
+
+anova(m0, m_cyc)
+```
+Adding the cyclomatic_compl_z DOES NOT make the model fit better p = 0.5182
+
+
+
+We can now consider our model in depth: 
+
+```{r}
+summary(m0)
+r2(m0)
+```
+
+exercise (-2.574, 0.01005 * ) less concise
+ai (3.039  0.00237 **) more concise
+project name (-2.000  0.04545 * ) spring-ai-alibaba project are less consice
+
+
+
+## Readability Category in Summary
+
+```{r}
+# read in the AIC/BIC data
+fin = sprintf("%s/readability_both_score_model_summaries_only_frozen_re/metrics.csv", outputdir)
+log_time_models_da = read_csv(fin)
+
+
+head(log_time_models_da[order(log_time_models_da$AIC),], n = 10)
+head(log_time_models_da[order(log_time_models_da$BIC),], n = 10)
+```
+AIC and BIC disagree on the best model fit so we use an anova to determine best one
+
+```{r}
+fA = log_time_models_da[order(log_time_models_da$AIC),]$formula[[1]]
+#cat(fA)
+m0 = clmm(fA, data=df)
+
+fB = log_time_models_da[order(log_time_models_da$BIC),]$formula[[1]]
+#cat(fB)
+m1 =  clmm(fB, data=df)
+
+
+anova(m0,m1)
+```
+
+Model favor m0 : factor(readability_both) ~ exercise + ai + seq_num + project_name + exercise:ai + ai:seq_num + (1 | part_id)
+
+
+
+We are intested in assessing complexity metrics
+
+```{r}
+df$halstead_z <- scale(df$halstead_volume) #we need to rescale it
+f_hal =  factor(readability_both) ~ exercise + ai + seq_num + project_name + exercise:ai + ai:seq_num + halstead_z+ (1 | part_id)
+m_hal = clmm(f_hal, data=df)
+
+anova(m0, m_hal)
+```
+Adding the halstead_z DOES NOT make the model fit better p =  0.07401 .(looks like possible trend though)
+
+```{r}
+df$cyclomatic_compl_z <- scale(df$cyclomatic_compl) #we need to rescale it
+f_cyc =  factor(readability_both) ~ exercise + ai + seq_num + project_name + exercise:ai + ai:seq_num + cyclomatic_compl_z + (1 | part_id) 
+m_cyc = clmm(f_cyc, data=df)
+
+anova(m0, m_cyc)
+```
+Adding the cyclomatic_compl_z DOES NOT make the model fit better p = 0.6592
+
+
+
+We can now consider our model in depth: 
+
+```{r}
+summary(m0)
+r2(m0)
+```
+
+
+project name (-2.187   0.0287 *) spring-ai-alibaba project are less readable
+
+

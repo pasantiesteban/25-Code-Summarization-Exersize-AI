@@ -1,0 +1,22 @@
+<p>(1) <strong>Code Comment Summary for <code>fillComment</code>:</strong></p>
+<p><code>java
+/**
+ * Fills a cell with a comment using provided `CommentData`.
+ *
+ * This method adds a comment to a cell in the active sheet,
+ * utilizing the specified coordinates and dimensions. It selects
+ * the appropriate anchor type based on the Excel file format (XLSX
+ * or XLS) and sets the comment's text and author if available in 
+ * `CommentData`.
+ *
+ * @param cellWriteHandlerContext Context holding details about
+ * the cell being written.
+ * @param commentData The data object containing comment details 
+ * such as text and author.
+ */</code></p>
+<p>(2)
+```
+yes
+Initialization bug</p>
+<p>The bug is in the <code>fillImage</code> method, specifically in the initialization of the <code>drawing</code> object. <code>sheet.getDrawingPatriarch()</code> might return <code>null</code>, and although <code>drawing</code> is then initialized, further usage does not take null safety into account, which could lead to <code>NullPointerException</code>.
+```</p>

@@ -1,0 +1,21 @@
+<ol>
+<li><strong><code>initBody</code> Method Summary:</strong></li>
+<li>The <code>initBody</code> method configures the HTTP request body for a given request specification (<code>WebClient.RequestBodySpec</code>) based on the <code>HttpRequestNodeBody</code> type.</li>
+<li>It handles various body types such as NONE, RAW_TEXT, JSON, X_WWW_FORM_URLENCODED, FORM_DATA, and BINARY.</li>
+<li>It performs variable replacement within the body data using the current state.</li>
+<li>
+<p>Errors are thrown if preconditions for specific body types (e.g., expecting a single item for RAW_TEXT) are not met.</p>
+</li>
+<li>
+<p>Bug Identification:
+   <code>yes
+   logic error</code></p>
+</li>
+<li>
+<p><strong>Bug Explanation:</strong></p>
+<ul>
+<li>Within the INIT_BODY method, there's a logic error in the <code>FORM_DATA</code> case where there is an incorrect line attempting to read <code>jsonTemplate</code>, which is not defined within the <code>FORM_DATA</code> context. The line <code>jsonObject = new ObjectMapper().readValue(jsonTemplate, Object.class);</code> appears to be misplaced as it is unnecessary in this context.</li>
+<li>The correct usage should involve handling only form data without referencing JSON parsing logic inadvertently.</li>
+</ul>
+</li>
+</ol>

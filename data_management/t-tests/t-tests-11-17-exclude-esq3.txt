@@ -1,0 +1,42 @@
+Average duration of 1 task: 504.80513899613896
+Average duration of 1 task if exercise: 524.6970236220474
+Average duration of 1 task if ai: 478.12093749999997
+
+Average duration of 1 task if good ai: 455.9288985507247
+Average duration of 1 task if bad ai: 504.0743389830509
+
+Average duration of 1 task if exercise and ai: 502.12953125
+Average duration of 1 task if exercise and no ai: 547.6227301587303
+Average duration of 1 task if no exercise and ai: 454.1123437499999
+Average duration of 1 task if no exercise and no ai: 515.3649852941176
+
+Average length of 1 summary: 358.984555984556
+Average length of 1 summary if exercise: 392.9685039370079
+Average length of 1 summary if ai: 324.6484375
+
+Average length of 1 summary if good ai: 320.1014492753623
+Average length of 1 summary if bad ai: 329.96610169491527
+
+Average length of 1 summary if exercise and ai: 338.53125
+Average length of 1 summary if exercise and no ai: 448.26984126984127
+Average length of 1 summary if no exercise and ai: 310.765625
+Average length of 1 summary if no exercise and no ai: 340.8970588235294
+
+T test, 1-tailed: duration, ai vs no ai. t_statistic: -1.8131401120818709 p_value: 0.03548879413411225
+T test, 1-tailed: duration, ai vs no ai AND zoom-supervised. t_statistic: -1.6592287138205182 p_value: 0.04923345286715193
+T test: duration, good ai vs bad ai. t_statistic: -1.2020728425236367 p_value: 0.23159429940074286
+T test: duration, exercise vs no exercise. t_statistic: 1.334514424840822 p_value: 0.18323294561082445
+T test: duration, exercise vs no exercise AND zoom-supervised. t_statistic: 1.2722140743053472 p_value: 0.20463593424340687
+T test, 1-tailed: duration, exercise vs no exercise. t_statistic: 1.334514424840822 p_value: 0.09161647280541223
+T test, 1-tailed: duration, exercise vs no exercise AND zoom-supervised. t_statistic: 1.2722140743053472 p_value: 0.10231796712170343
+T test: duration, exercise and ai vs no exercise no ai. t_statistic: -0.31444513930050433 p_value: 0.7536913181614431
+T test: duration, exercise and bad ai vs exercise. t_statistic: 0.21418070552374116 p_value: 0.8313054517514054
+T test: duration, exercise and bad ai vs bad ai. t_statistic: 0.6179912904202107 p_value: 0.5390019343731531
+
+T test, 1-tailed: summary len, ai vs no ai. t_statistic: -2.2895857120638285 p_value: 0.01147022468038998
+T test, 1-tailed: summary len, ai vs no ai AND zoom-supervised. t_statistic: -2.0929519674201478 p_value: 0.018775104058965392
+T test, 1-tailed: summary len, exercise vs no exercise. t_statistic: 2.2166032824628847 p_value: 0.013896406991004372
+T test, 1-tailed: summary len, exercise vs no exercise AND zoom-supervised. t_statistic: 2.045011205507943 p_value: 0.02121303244594165
+
+ANOVA: duration, exercise_ai exercise_no_ai no_exercise_ai no_exercise_no_ai f_statistic: 1.749162665840484 p_value: 0.15742903635701772
+ANOVA: summary length, exercise_ai exercise_no_ai no_exercise_ai no_exercise_no_ai f_statistic: 4.1487965258244035 p_value: 0.006804358042623973

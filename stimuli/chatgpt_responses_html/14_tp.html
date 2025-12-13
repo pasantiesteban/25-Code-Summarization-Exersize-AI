@@ -1,0 +1,7 @@
+<p>(1) <strong>Summary of <code>fillComment</code> Method:</strong></p>
+<p>This method adds a comment to a cell in an Excel sheet. It first checks if <code>commentData</code> is null and returns if true. It determines the type of Excel file (XLSX or not) and creates a client anchor to position the comment. The anchor coordinates are calculated using the comment's positional data. A comment is then created using the sheet's drawing patriarch. The method sets the comment's text and author if available, and finally associates the comment with the cell.</p>
+<p>(2) <strong>Bug Identification:</strong></p>
+<p>yes</p>
+<p>ConcurrentModificationException</p>
+<p>Explanation:
+In the <code>else</code> block of <code>fillComment</code>, a wrong assignment overwrites the <code>anchor</code> variable for the <code>HSSFClientAnchor</code>. This results in a <code>ConcurrentModificationException</code> since the same logic is repeated after an incorrect assignment. Only one logic branch should exist for each type of Excel file. The repeated block within the <code>else</code> statement is unnecessary and likely a copy-paste error.</p>

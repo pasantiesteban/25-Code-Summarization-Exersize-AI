@@ -1,0 +1,560 @@
+---
+title: "Defect Detection Accuracy (AI-only; to assess AI correctness impact)"
+output: html_document
+date: "2025-1-29"
+---
+
+## Packages
+
+```{r}
+# import packages
+library(lme4)     # mixed models
+library(dplyr)    # dataframe manipulation
+library(readr)    # reading in the data
+library(emmeans)  # likelihood ratio testing
+library(purrr)    # for map()
+library(lattice)  # for xyplot()
+library(TAF)      # setting up output file directory structure during model fitting
+library(moments)  # skewness for selecting between additive and multiplicative models of response times
+library(ordinal)
+library(performance)
+
+library(ggplot2)
+
+
+#If you get an error, you likely need to install the packages using the "install.package('insert-package-name-here')" command
+```
+
+
+## Notebook configurable settings
+
+```{r}
+# name the directories to read data from and write output to
+input_version = 2
+output_version = 'programming'
+
+```
+
+make an overall output directory (model summaries, stats, etc. will all go here)
+```{r}
+outputdir = sprintf("%s/../candidate-models/regression-models-%s",getwd(), output_version)
+#mkdir(outputdir)
+```
+
+
+## Loading Data
+
+```{r}
+input_file = sprintf("%s/../preprocessed-data/full-data-version-%d/programming-full-data.csv", getwd(), input_version)
+data <- read.csv(input_file)
+
+#data
+
+```
+## Data management
+
+Computing the IPAQ score and adding it as a column to the data
+```{r}
+
+# Helper to force numeric and turn NAs/blanks into 0
+nz <- function(x) {
+  x <- suppressWarnings(as.numeric(x))
+  x[is.na(x)] <- 0
+  x
+}
+
+# Coerce all inputs
+data$days_vigorous    <- nz(data$days_vigorous)
+data$minutes_vigorous <- nz(data$minutes_vigorous)
+data$days_moderate    <- nz(data$days_moderate)
+data$minutes_moderate <- nz(data$minutes_moderate)
+data$days_walking     <- nz(data$days_walking)
+data$minutes_walking  <- nz(data$minutes_walking)   # important: was <chr>
+data$hours_sitting    <- nz(data$hours_sitting)
+
+# MET constants from IPAQ scoring guidelines
+MET_VIG  <- 8.0
+MET_MOD  <- 4.0
+MET_WALK <- 3.3
+
+# Component MET-min/week scores
+data$vigorous_met <- ifelse(
+  data$days_vigorous > 0 & data$minutes_vigorous > 0,
+  data$days_vigorous * data$minutes_vigorous * MET_VIG,
+  0
+)
+
+data$moderate_met <- ifelse(
+  data$days_moderate > 0 & data$minutes_moderate > 0,
+  data$days_moderate * data$minutes_moderate * MET_MOD,
+  0
+)
+
+data$walking_met <- ifelse(
+  data$days_walking > 0 & data$minutes_walking > 0,
+  data$days_walking * data$minutes_walking * MET_WALK,
+  0
+)
+
+# Total IPAQ MET-min/week
+data$ipa_total_met <- data$vigorous_met + data$moderate_met + data$walking_met
+
+# Number of days doing ANY activity (required for categorization)
+data$total_days_any <- data$days_vigorous + data$days_moderate + data$days_walking
+
+# IPAQ categorical classification HIGH / MODERATE / LOW
+data$ipaq_category <- "Low"   # default
+
+# High:
+data$ipaq_category[
+  (data$days_vigorous >= 3 & data$ipa_total_met >= 1500) |
+  (data$total_days_any >= 7 & data$ipa_total_met >= 3000)
+] <- "High"
+
+# Moderate (only if not High):
+data$ipaq_category[
+  data$ipaq_category != "High" &
+  (
+    (data$days_vigorous >= 3 & data$minutes_vigorous >= 20) |
+    (data$days_moderate >= 5 & data$minutes_moderate >= 30) |
+    (data$days_walking  >= 5 & data$minutes_walking  >= 30) |
+    (data$total_days_any >= 5 & data$ipa_total_met >= 600)
+  )
+] <- "Moderate"
+
+# Done! You now have:
+# vigorous_met, moderate_met, walking_met, ipa_total_met, ipaq_category
+
+# Optional quick checks:
+table(data$ipaq_category)
+summary(data$ipa_total_met)
+
+
+
+```
+
+# Data filtering
+
+
+We are remvoing trails where the participant did not read the AI when in the AI group and the participants in the self-video format
+```{r}
+#df <- subset(data, zoom_self != "self")
+df <- subset(data, read_ai != "No")
+
+```
+
+## Only looking at (AI-ONLY)
+
+```{r}
+
+
+df$bug_found_num <- ifelse(df$correctly_identifies_bug_scorer_2 == "Y", 1,
+                            ifelse(df$correctly_identifies_bug_scorer_2 == "N", 0, NA))
+
+
+df_ai <- subset(df, ai == "True")
+
+
+```
+
+
+
+
+
+We consider when AI is right (true positive, true negative) and wrong (false poisitve and false negative)
+```{r}
+
+df_ai$ai3 <- case_when(
+    df_ai$tp_tn %in% c("TP","TN") ~ "ai_correct",
+    df_ai$tp_tn == "FN" ~ "ai_wrong",
+    df_ai$tp_tn == "FP" ~ "ai_wrong"
+)
+
+
+table(df_ai$ai3)
+
+```
+
+
+check participant count
+```{r}
+#Make sure you have n=46 participants 
+
+
+
+id <- unique(df_ai$part_id)
+id #all unique IDs
+length(id) #number of participants
+```
+
+
+## Select independent variables 
+
+
+## Specify candidate predictor structures for mixed model formulas
+
+```{r}
+
+
+# Core Main Effects
+#These are our main experimental manipulations + learning effect (seq_num)
+core_mains <- c("exercise", "ai3", "seq_num")
+
+# covariates
+optional_mains <- c("project_name", "ipaq_category", "occupation")
+
+# Optional interactions
+candidate_interactions <- c(
+  "exercise * ai3",
+  "exercise * ipaq_category",     #perhaps the effect of exericse on bug detection is mediated by participant's fitness level
+  "ai3 * seq_num",
+  "exercise * seq_num"
+  
+)
+
+```
+
+
+
+## Specify candidate random effect structure for mixed model forumlas
+
+```{r }
+
+
+random_structures <- c(
+  R01 = "(1 | part_id)", 
+  R02 = "(1 | stim_src_id)", 
+  R0  = "(1 | part_id) + (1 | stim_src_id)"              # intercepts only
+  #R1  = "(1 + tp_tn | part_id) + (1 | stim_src_id)",            # AI slope
+  #R2  = "(1 + exercise | part_id) + (1 | stim_src_id)"      # exercise slope
+  #R3  = "(1 + ai + exercise | part_id) + (1 | stim_src_id)", # both slopes (correlated)
+  #R3u = "(1 + ai + exercise || part_id) + (1 | stim_src_id)" # both slopes, no corr
+)
+
+```
+
+
+
+# Determine the random effect structure
+
+
+```{r}
+
+fixed_main <- "bug_found_num ~ exercise + tp_tn + seq_num"
+
+fit_random_structures <- function(df, fixed_main, random_structures) {
+  lapply(random_structures, function(re) {
+    f <- as.formula(paste(fixed_main, "+", re))
+    print(f)
+    glmer(
+      f,
+      data = df_ai,
+      family = binomial,
+      control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+    )
+  })
+}
+
+m_rand <- fit_random_structures(df, fixed_main, random_structures)
+sapply(m_rand, AIC)
+sapply(m_rand, BIC)
+sapply(m_rand, isSingular)
+```
+Almost all trigger a 'isSingular' fit except R02. 
+The only random effect that your dataset can actually support is a random intercept for stimulus, not for participants.
+
+We are going to keep (1 | stim_src_id) (no singular fit error and lowest AIC/BIC) as our fixed random structure
+
+
+
+### candidiate fixed effects structures
+```{r}
+make_fixed_forms <- function(core_mains, optional_mains, candidate_interactions) {
+  fixed_forms <- character(0)
+  
+  ## 1) Parse interactions into list(name, vars)
+  interaction_defs <- lapply(candidate_interactions, function(trm) {
+    vars <- trimws(strsplit(trm, "\\*")[[1]])
+    list(
+      name = paste(vars, collapse = ":"),  # use ":" in the formula
+      vars = vars
+    )
+  })
+  
+  ## 2) All subsets of optional mains (including empty set)
+  opt_subsets <- list(character(0))
+  if (length(optional_mains) > 0) {
+    for (k in 1:length(optional_mains)) {
+      opt_subsets <- c(
+        opt_subsets,
+        combn(optional_mains, k, simplify = FALSE)
+      )
+    }
+  }
+  
+  ## 3) All subsets of interactions (including empty)
+  int_subsets <- list(integer(0))
+  n_int <- length(interaction_defs)
+  if (n_int > 0) {
+    for (k in 1:n_int) {
+      int_subsets <- c(
+        int_subsets,
+        combn(seq_len(n_int), k, simplify = FALSE)
+      )
+    }
+  }
+  
+  ## 4) Build RHS strings
+  for (opt_set in opt_subsets) {
+    for (int_idx_set in int_subsets) {
+      
+      if (length(int_idx_set) == 0) {
+        int_terms <- character(0)
+        int_vars  <- character(0)
+        int_defs  <- list()
+      } else {
+        int_defs  <- interaction_defs[int_idx_set]
+        int_terms <- vapply(int_defs, `[[`, character(1), "name")
+        int_vars  <- unique(unlist(lapply(int_defs, `[[`, "vars")))
+      }
+      
+      ## RULE 1: tp_tn only appears in interactions that include ai
+      #if (length(int_terms) > 0) {
+        #bad_tp <- vapply(int_defs, function(def) {
+          #has_tp <- "tp_tn" %in% def$vars
+          #has_ai <- "ai"    %in% def$vars
+          #has_tp && !has_ai
+        #}, logical(1))
+        #if (any(bad_tp)) next
+     # }
+      
+      ## all main-effect variables present in this model
+      mains_here <- unique(c(core_mains, opt_set))
+      
+      ## hierarchy rule: all interaction vars EXCEPT tp_tn must be in mains
+      int_vars_no_tp <- setdiff(int_vars, "tp_tn")
+      if (!all(int_vars_no_tp %in% mains_here)) {
+        next
+      }
+      
+      ## RULE 2: if exercise:ai:tp_tn present, require exercise:ai and ai:tp_tn
+      #if ("exercise:ai:tp_tn" %in% int_terms) {
+        #required_lower <- c("exercise:ai", "ai:tp_tn")
+        #if (!all(required_lower %in% int_terms)) next
+      #}
+      
+      terms <- c(core_mains, opt_set, int_terms)
+      rhs   <- paste(terms, collapse = " + ")
+      fixed_forms <- c(fixed_forms, rhs)
+    }
+  }
+  
+  unique(fixed_forms)
+}
+fixed_forms <- make_fixed_forms(core_mains, optional_mains, candidate_interactions)
+#fixed_forms[grepl("tp_tn", fixed_forms)]
+#length(fixed_forms)
+#fixed_forms
+
+```
+
+
+
+
+In this first cell, we enumerate random effect structures by taking all combinations of the random effects specified.
+
+```{r}
+
+random_exprs = "(1 | stim_src_id)"
+  
+```
+
+
+
+Now, we combine the response variable, fixed effects, and random effects together to generate our candidate model structures.
+
+```{r}
+
+loglinear_formulae = c()
+for (fe in fixed_forms) {
+  for (re in random_exprs) {
+    f = ""
+    if (fe == "") {
+      f = sprintf("(bug_found_num) ~ %s", re)
+    } else {
+      f = sprintf("(bug_found_num) ~ %s + %s", fe, re)
+    }
+    loglinear_formulae = append(loglinear_formulae, f)
+  }
+}
+
+print(length(loglinear_formulae))
+
+```
+
+
+### Model fitting (\~2 minutes)
+
+Here, we fit all the models. Of note, we use MLE rather than REML for compatibility with the AIC model selection strategy.
+
+We also store BIC (an alternative model selection criterion) in addition to AIC here. The two have different theoretical properties, both of which may be useful. Both describe the log likelihood of a fitted model, with a penalty for model complexity. The penalty in BIC is higher than that for AIC, so optimal-BIC models tend to be smaller (with fewer parameters) than optimal-AIC models. We have done our analysis relying on AIC, but we provide BIC-based model selection here in case the reader is interested.
+
+```{r eval=FALSE}
+if (TRUE) {
+  # make an output directory for the output of all the candidate linear models
+  logtime_outputdir = 
+    sprintf("%s/accuracy_bug_ai3_model_summaries_frozen_re", outputdir)
+  mkdir(logtime_outputdir)
+  
+  # make an output file for the AIC and BIC of each model
+  metricsfile = sprintf("%s/metrics.csv", logtime_outputdir)
+  file.create(metricsfile)
+  
+  sink(file = metricsfile,
+       append = FALSE,
+       type = "output",
+       split = FALSE
+       )
+  
+  cat("formula,AIC,BIC\n")
+  
+  sink()
+  
+  for (f in loglinear_formulae) {
+    # make an output directory for the output of this specific candidate model
+    f_outputdir = sprintf("%s/%s", logtime_outputdir, gsub(" ", "", f, fixed = TRUE))
+    mkdir(f_outputdir)
+    
+    # make the individual output file
+    summaryfile = sprintf("%s/summary.txt", f_outputdir)
+    
+    file.create(summaryfile)
+    
+    # print a delimiter for console output
+    cat(sprintf("\n---------------------------------------------\n%s\n", f))
+    
+    # fit the model
+    #m = try(glmer(f, family=binomial, data=data))
+    
+    result <- tryCatch({
+      # Code that may produce an error
+      m = try(glmer(f, family=binomial, data=df_ai))
+      # send the model summary to the summary file
+      sink(file = summaryfile,
+         append = FALSE,
+         type = "output",
+         split = FALSE
+         )
+    
+      print(summary(m))
+    
+      sink()
+      
+      # send the AIC and BIC to the metrics file
+      metrics = sprintf("%s,%f,%f\n", f, AIC(m), BIC(m))
+    
+      sink(file = metricsfile,
+         append = TRUE,
+         type = "output",
+         split = FALSE)
+    
+      cat(metrics)
+    
+      sink()
+      
+      }, error = function(e) {
+      # Handle the error
+      cat("An error occurred:", conditionMessage(e), "\n")
+      NA
+      })
+    
+  }
+}
+``` 
+
+
+
+### Model selection
+
+```{r}
+# read in the AIC/BIC data
+fin = sprintf("%s/accuracy_bug_ai3_model_summaries_frozen_re/metrics.csv", outputdir)
+log_time_models_da = read_csv(fin)
+
+```
+
+
+```{r}
+head(log_time_models_da[order(log_time_models_da$AIC),], n = 10)
+```
+
+```{r}
+head(log_time_models_da[order(log_time_models_da$BIC),], n = 10)
+```
+
+
+
+
+```{r}
+fA = log_time_models_da[order(log_time_models_da$AIC),]$formula[[1]]
+cat(fA)
+```
+
+
+```{r}
+fB = log_time_models_da[order(log_time_models_da$BIC),]$formula[[1]]
+cat(fB)
+```
+
+
+
+```{r}
+
+
+m0 = glmer(fA, family=binomial, data=df_ai, control = glmerControl(optimizer = "bobyqa"))
+summary(m0)
+
+```
+
+
+
+
+```{r}
+#fB= (bug_found_num) ~ exercise + AI_correct + seq_num + project_name +  has_bug + exercise:seq_num + exercise:has_bug +(1 | stim_src_id)
+m1 =  glmer(fB, family=binomial, data=df_ai)
+summary(m1)
+```
+
+Since AIC and BIC disagree on which model is better, we check via an ANOVA
+
+```{r}
+
+anova(m0,m1)
+r2(m1)
+```
+
+m0 is not wanted, so we choose model m1
+
+exerciseTrue:has_bugTrue  = –2.13222   p = .0308 
+When a bug is present, exercise greatly decreases the odds of being correct.
+with bugs present, exercise reduces correctness by ~88% relative to non-exercise.
+"This suggests that exercise may have increased trust in the AI or reduced careful scrutiny when actual bugs were present."
+
+AI_correct1 = 2.4694   p = 6.5e-06
+When the AI was correct, participants were far more likely to be correct.
+The human was about 12× more likely to be correct.
+
+project_namespring-ai-alibaba = –1.0315   p = .0443
+trials from this specific project had lower accuracy overall.
+
+
+
+
+
+```{r}
+emmeans(m0, pairwise ~ ai3)
+
+```
+Logit –1.02 → probability ≈ 0.27
+Logit +1.45 → probability ≈ 0.81
+
